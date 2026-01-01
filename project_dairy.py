@@ -16,8 +16,10 @@ except ImportError:
 LOGIN_URL = "https://vtuapi.internyet.in/api/v1/auth/login"
 STORE_URL = "https://vtuapi.internyet.in/api/v1/student/project-diaries/store"
 
-# REPLACED AS REQUESTED
-PROJECT_ID = "your_project_id"  # Replace with your actual project ID (from the VTU portal using browser dev tools)
+# !!! CRITICAL: UPDATE THIS ID !!!
+# Go to your browser Developer Tools -> Network Tab -> Look for "project-diaries"
+# to find the numeric ID for your specific project.
+PROJECT_ID = 3311 
 
 # --- COMPLETE SKILL MAPPING ---
 SKILLS = {
@@ -73,6 +75,7 @@ def validate_and_load_file(file_path):
 def get_skill_ids(skills_str):
     """Maps a comma-separated string of skill names to their ID list."""
     if pd.isna(skills_str): return []
+    # Split by comma, strip whitespace, and look up ID
     names = [s.strip() for s in str(skills_str).split(',')]
     return [SKILLS[name] for name in names if name in SKILLS]
 
@@ -85,29 +88,42 @@ def main():
 
     # Load and validate data
     df = validate_and_load_file(args.file)
-    print(f"Successfully loaded {len(df)} entries.")
+    print(f"Successfully loaded {len(df)} entries from {args.file}.")
 
     session = requests.Session()
 
-    # 1. Authentication
     try:
+        # 1. Authentication
         print("Logging in...")
         auth_resp = session.post(LOGIN_URL, json={"email": args.email, "password": args.password})
-        auth_resp.raise_for_status()
+        
+        if auth_resp.status_code != 200:
+            print(f"Login Failed: {auth_resp.text}")
+            sys.exit(1)
+            
         token = auth_resp.json().get('token')
         headers = {
             "Authorization": f"Bearer {token}", 
             "Content-Type": "application/json", 
             "Accept": "application/json"
         }
-        print("Authentication successful.")
+        print("Authentication successful. Starting upload...")
 
-        # 2. Sequential Posting
-        
+# 2. Sequential Posting
+        success_count = 0
         for idx, row in df.iterrows():
+            # --- FIX: FORCE DATE FORMAT CONVERSION ---
+            try:
+                # Converts any format (DD-MM-YYYY, etc.) to YYYY-MM-DD
+                formatted_date = pd.to_datetime(row['date'], dayfirst=True).strftime('%Y-%m-%d')
+            except Exception as e:
+                print(f"Skipping row {idx}: Invalid date format '{row['date']}'")
+                continue
+            # -----------------------------------------
+
             payload = {
                 "project_id": PROJECT_ID,
-                "date": str(row['date']).split(' ')[0], # Format YYYY-MM-DD
+                "date": formatted_date,  # Uses the converted date
                 "description": str(row['description']),
                 "hours": float(row['hours']),
                 "links": "",
@@ -117,18 +133,26 @@ def main():
                 "skill_ids": get_skill_ids(row['skills'])
             }
 
-            print(f"[{idx+1}/{len(df)}] Posting entry for {payload['date']}...")
-            resp = session.post(STORE_URL, json=payload, headers=headers)
+            print(f"[{idx+1}/{len(df)}] Uploading entry for {payload['date']}...", end=" ")
             
-            if resp.status_code in [200, 201]:
-                print("  Status: Success")
-            else:
-                print(f"  Status: Failed ({resp.status_code}) - {resp.text}")
+            try:
+                resp = session.post(STORE_URL, json=payload, headers=headers)
+                
+                if resp.status_code in [200, 201]:
+                    print("OK")
+                    success_count += 1
+                else:
+                    print(f"FAILED ({resp.status_code}) - {resp.text}")
+            except Exception as req_err:
+                print(f"ERROR: {req_err}")
             
-            time.sleep(1.5) # Anti-spam delay
+            time.sleep(1.5)
+
+        print(f"\n--- Process Complete ---")
+        print(f"Successfully uploaded: {success_count}/{len(df)}")
 
     except Exception as e:
-        print(f"Critical Error: {e}")
+        print(f"\nCritical Error during execution: {e}")
 
 if __name__ == "__main__":
     main()
